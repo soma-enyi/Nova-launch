@@ -30,9 +30,28 @@ export function TutorialOverlay({
     isActive,
 }: TutorialOverlayProps) {
     const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
+    const [isVisible, setIsVisible] = useState(false);
     const step = steps[currentStep];
     const isLastStep = currentStep === steps.length - 1;
     const isFirstStep = currentStep === 0;
+
+    // Animate entrance
+    useEffect(() => {
+        if (isActive) {
+            setIsVisible(true);
+        } else {
+            setIsVisible(false);
+        }
+    }, [isActive]);
+
+    // Reset animation on step change
+    useEffect(() => {
+        if (isActive) {
+            setIsVisible(false);
+            const timer = setTimeout(() => setIsVisible(true), 50);
+            return () => clearTimeout(timer);
+        }
+    }, [currentStep, isActive]);
 
     useEffect(() => {
         if (!isActive || !step?.targetSelector) {
@@ -58,6 +77,35 @@ export function TutorialOverlay({
             window.removeEventListener('scroll', updateTargetRect);
         };
     }, [isActive, step?.targetSelector]);
+
+    // Keyboard navigation
+    useEffect(() => {
+        if (!isActive) return;
+
+        const handleKeyDown = (e: KeyboardEvent) => {
+            switch (e.key) {
+                case 'Escape':
+                    onSkip();
+                    break;
+                case 'ArrowRight':
+                case 'Enter':
+                    if (!isLastStep) {
+                        onNext();
+                    } else {
+                        onComplete();
+                    }
+                    break;
+                case 'ArrowLeft':
+                    if (!isFirstStep) {
+                        onPrevious();
+                    }
+                    break;
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [isActive, isFirstStep, isLastStep, onNext, onPrevious, onSkip, onComplete]);
 
     if (!isActive || !step) return null;
 
@@ -112,7 +160,7 @@ export function TutorialOverlay({
             {/* Highlight cutout */}
             {targetRect && (
                 <div
-                    className="fixed z-[9999] pointer-events-none"
+                    className="fixed z-[9999] pointer-events-none animate-pulse"
                     style={{
                         top: `${targetRect.top - 4}px`,
                         left: `${targetRect.left - 4}px`,
@@ -121,58 +169,88 @@ export function TutorialOverlay({
                         boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.5), 0 0 20px rgba(59, 130, 246, 0.5)',
                         borderRadius: '8px',
                         border: '2px solid rgb(59, 130, 246)',
+                        animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
                     }}
                 />
             )}
 
             {/* Tooltip */}
             <div
-                className="fixed z-[10000] bg-white rounded-lg shadow-2xl max-w-md w-full mx-4"
+                className={`fixed z-[10000] bg-white rounded-lg shadow-2xl max-w-md w-full mx-4 transition-all duration-300 ${
+                    isVisible ? 'opacity-100 scale-100' : 'opacity-0 scale-95'
+                }`}
                 style={getTooltipPosition()}
+                role="dialog"
+                aria-labelledby="tutorial-title"
+                aria-describedby="tutorial-content"
             >
                 <div className="p-6">
                     {/* Progress indicator */}
                     <div className="flex items-center justify-between mb-4">
-                        <div className="flex gap-1">
-                            {steps.map((_, index) => (
-                                <div
-                                    key={index}
-                                    className={`h-1.5 rounded-full transition-all ${
-                                        index === currentStep
-                                            ? 'w-8 bg-blue-600'
-                                            : index < currentStep
-                                            ? 'w-1.5 bg-blue-400'
-                                            : 'w-1.5 bg-gray-300'
-                                    }`}
-                                />
-                            ))}
+                        <div className="flex items-center gap-3">
+                            <div className="flex gap-1">
+                                {steps.map((_, index) => (
+                                    <div
+                                        key={index}
+                                        className={`h-1.5 rounded-full transition-all ${
+                                            index === currentStep
+                                                ? 'w-8 bg-blue-600'
+                                                : index < currentStep
+                                                ? 'w-1.5 bg-blue-400'
+                                                : 'w-1.5 bg-gray-300'
+                                        }`}
+                                        aria-label={`Step ${index + 1}${index === currentStep ? ' (current)' : ''}`}
+                                    />
+                                ))}
+                            </div>
+                            <span className="text-xs text-gray-500">
+                                {currentStep + 1} / {steps.length}
+                            </span>
                         </div>
                         <button
                             onClick={onSkip}
                             className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
                             aria-label="Skip tutorial"
+                            title="Press ESC to skip"
                         >
                             Skip
                         </button>
                     </div>
 
                     {/* Content */}
-                    <h3 className="text-lg font-semibold text-gray-900 mb-2">{step.title}</h3>
-                    <p className="text-sm text-gray-600 mb-6">{step.content}</p>
+                    <h3 id="tutorial-title" className="text-lg font-semibold text-gray-900 mb-2">
+                        {step.title}
+                    </h3>
+                    <p id="tutorial-content" className="text-sm text-gray-600 mb-6">
+                        {step.content}
+                    </p>
 
                     {/* Navigation */}
                     <div className="flex gap-3">
                         {!isFirstStep && (
-                            <Button variant="outline" onClick={onPrevious} className="flex-1">
+                            <Button 
+                                variant="outline" 
+                                onClick={onPrevious} 
+                                className="flex-1"
+                                title="Press ← to go back"
+                            >
                                 Previous
                             </Button>
                         )}
                         <Button
                             onClick={isLastStep ? onComplete : onNext}
                             className="flex-1"
+                            title={isLastStep ? "Press Enter to finish" : "Press → or Enter to continue"}
                         >
                             {isLastStep ? 'Finish' : 'Next'}
                         </Button>
+                    </div>
+
+                    {/* Keyboard hints */}
+                    <div className="mt-4 pt-4 border-t border-gray-200">
+                        <p className="text-xs text-gray-500 text-center">
+                            Use arrow keys to navigate • ESC to skip
+                        </p>
                     </div>
                 </div>
             </div>

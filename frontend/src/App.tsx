@@ -10,6 +10,7 @@ import { TokenDeployForm } from "./components/TokenDeployForm";
 import {
   TutorialOverlay,
   CompletionCelebration,
+  TutorialSettings,
   useTutorial,
   deploymentTutorialSteps,
 } from "./components/Tutorial";
@@ -34,6 +35,7 @@ function usePathname() {
 function App() {
   const { wallet, connect, disconnect, isConnecting, error } = useWallet();
   const [showCelebration, setShowCelebration] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const tutorial = useTutorial(deploymentTutorialSteps);
 
   const handleTutorialComplete = () => {
@@ -73,6 +75,18 @@ function App() {
                 data-tutorial="restart-tutorial"
               >
                 Start Tutorial
+              </Button>
+            )}
+            {tutorial.hasCompletedBefore && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowSettings(true)}
+                title="Tutorial settings"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                </svg>
               </Button>
             )}
             {wallet.connected && wallet.address ? (
@@ -130,6 +144,11 @@ function App() {
           isActive={tutorial.isActive}
         />
         <CompletionCelebration isOpen={showCelebration} onClose={handleCelebrationClose} />
+        <TutorialSettings
+          isOpen={showSettings}
+          onClose={() => setShowSettings(false)}
+          onResetTutorial={tutorial.reset}
+        />
       </div>
     </ErrorBoundary>
   );

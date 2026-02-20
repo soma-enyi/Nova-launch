@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { TutorialStep } from './TutorialOverlay';
+import { tutorialAnalytics } from './tutorialAnalytics';
 
 const TUTORIAL_STORAGE_KEY = 'stellar_tutorial_completed';
 
@@ -13,16 +14,26 @@ export function useTutorial(steps: TutorialStep[]) {
         setHasCompletedBefore(completed === 'true');
     }, []);
 
+    // Track step views
+    useEffect(() => {
+        if (isActive && steps[currentStep]) {
+            tutorialAnalytics.viewStep(steps[currentStep].id, currentStep);
+        }
+    }, [isActive, currentStep, steps]);
+
     const start = useCallback(() => {
         setIsActive(true);
         setCurrentStep(0);
+        tutorialAnalytics.start();
     }, []);
 
     const next = useCallback(() => {
         if (currentStep < steps.length - 1) {
+            tutorialAnalytics.completeStep(steps[currentStep].id, currentStep);
             setCurrentStep((prev) => prev + 1);
+            tutorialAnalytics.viewStep(steps[currentStep + 1].id, currentStep + 1);
         }
-    }, [currentStep, steps.length]);
+    }, [currentStep, steps]);
 
     const previous = useCallback(() => {
         if (currentStep > 0) {
@@ -31,6 +42,7 @@ export function useTutorial(steps: TutorialStep[]) {
     }, [currentStep]);
 
     const skip = useCallback(() => {
+        tutorialAnalytics.skip();
         setIsActive(false);
         setCurrentStep(0);
         localStorage.setItem(TUTORIAL_STORAGE_KEY, 'true');
@@ -38,6 +50,7 @@ export function useTutorial(steps: TutorialStep[]) {
     }, []);
 
     const complete = useCallback(() => {
+        tutorialAnalytics.complete();
         setIsActive(false);
         setCurrentStep(0);
         localStorage.setItem(TUTORIAL_STORAGE_KEY, 'true');
