@@ -8,6 +8,7 @@ export interface TokenDeployParams {
         image: File;
         description: string;
     };
+    metadataUri?: string;
 }
 
 export interface DeploymentResult {
@@ -70,6 +71,11 @@ export const ErrorCode = {
     TRANSACTION_FAILED: 'TRANSACTION_FAILED',
     WALLET_REJECTED: 'WALLET_REJECTED',
     NETWORK_ERROR: 'NETWORK_ERROR',
+    SIMULATION_FAILED: 'SIMULATION_FAILED',
+    CONTRACT_ERROR: 'CONTRACT_ERROR',
+    TIMEOUT_ERROR: 'TIMEOUT_ERROR',
+    ACCOUNT_NOT_FOUND: 'ACCOUNT_NOT_FOUND',
+    INVALID_SIGNATURE: 'INVALID_SIGNATURE',
 } as const;
 
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
