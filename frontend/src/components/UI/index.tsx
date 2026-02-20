@@ -8,3 +8,4 @@ export { Toast } from './Toast';
 export { Skeleton, SkeletonCard } from './Skeleton';
 export { Modal } from './Modal';
 export { SuccessModal } from './SuccessModal';
+export { ShareButton } from './ShareButton';

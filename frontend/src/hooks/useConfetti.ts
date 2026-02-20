@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useEffect, useMemo } from 'react';
 import confetti from 'canvas-confetti';
 
 interface UseConfettiOptions {
@@ -12,6 +12,7 @@ interface UseConfettiOptions {
 
 /**
  * useConfetti — fires a celebratory confetti burst using canvas-confetti.
+ * Optimized for performance with proper cleanup and memoization.
  *
  * Usage:
  *   const { fire } = useConfetti();
@@ -24,23 +25,24 @@ export function useConfetti(options: UseConfettiOptions = {}) {
         disableForReducedMotion = true,
     } = options;
 
-    const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const animationFrameRef = useRef<number | null>(null);
+    const prefersReducedMotion = useMemo(
+        () => disableForReducedMotion && window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        [disableForReducedMotion]
+    );
 
     const stop = useCallback(() => {
-        if (intervalRef.current !== null) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
+        if (animationFrameRef.current !== null) {
+            cancelAnimationFrame(animationFrameRef.current);
+            animationFrameRef.current = null;
         }
     }, []);
 
+    // Cleanup on unmount
+    useEffect(() => stop, [stop]);
+
     const fire = useCallback(() => {
-        // Respect prefers-reduced-motion
-        if (
-            disableForReducedMotion &&
-            window.matchMedia('(prefers-reduced-motion: reduce)').matches
-        ) {
-            return;
-        }
+        if (prefersReducedMotion) return;
 
         stop(); // clear any previous burst
 
@@ -57,7 +59,7 @@ export function useConfetti(options: UseConfettiOptions = {}) {
         const randomInRange = (min: number, max: number) =>
             Math.random() * (max - min) + min;
 
-        intervalRef.current = setInterval(() => {
+        const frame = () => {
             const timeLeft = animationEnd - Date.now();
 
             if (timeLeft <= 0) {
@@ -78,8 +80,12 @@ export function useConfetti(options: UseConfettiOptions = {}) {
                 particleCount,
                 origin: { x: randomInRange(0.7, 0.9), y: Math.random() - 0.2 },
             });
-        }, 250);
-    }, [duration, colors, disableForReducedMotion, stop]);
+
+            animationFrameRef.current = requestAnimationFrame(frame);
+        };
+
+        animationFrameRef.current = requestAnimationFrame(frame);
+    }, [duration, colors, disableForReducedMotion, prefersReducedMotion, stop]);
 
     return { fire, stop };
 }

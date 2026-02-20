@@ -1,7 +1,8 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Modal } from './Modal';
 import { Button } from './Button';
+import { ShareButton } from './ShareButton';
 import { useConfetti } from '../../hooks/useConfetti';
 import type { DeploymentResult } from '../../types';
 import { truncateAddress, formatDate } from '../../utils/formatting';
@@ -19,7 +20,6 @@ interface SuccessModalProps {
 }
 
 // ─── Animation variants ───────────────────────────────────────────────────────
-
 
 const containerVariants = {
     hidden: { opacity: 0, scale: 0.92, y: 24 },
@@ -59,46 +59,60 @@ const checkmarkVariants = {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-/** Animated SVG checkmark drawn via stroke-dashoffset */
-function AnimatedCheckmark() {
+/** Animated SVG checkmark with enhanced effects - Memoized for performance */
+const AnimatedCheckmark = memo(() => {
     return (
         <motion.div
             className="relative flex items-center justify-center"
             variants={checkmarkVariants}
         >
-            {/* Outer ring pulse */}
+            {/* Multiple pulse rings for depth */}
             <motion.div
                 className="absolute w-28 h-28 rounded-full bg-green-400"
                 initial={{ scale: 0.8, opacity: 0.4 }}
                 animate={{ scale: 1.6, opacity: 0 }}
                 transition={{ duration: 1.2, repeat: Infinity, ease: 'easeOut', delay: 0.3 }}
             />
-            {/* Circle background */}
-            <div className="w-24 h-24 rounded-full bg-green-100 flex items-center justify-center shadow-lg">
-                <svg
-                    className="w-14 h-14 text-green-500"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2.5}
-                    aria-hidden="true"
-                >
-                    <motion.path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M5 13l4 4L19 7"
-                        initial={{ pathLength: 0, opacity: 0 }}
-                        animate={{ pathLength: 1, opacity: 1 }}
-                        transition={{ duration: 0.55, ease: 'easeOut', delay: 0.35 }}
-                    />
-                </svg>
-            </div>
+            <motion.div
+                className="absolute w-28 h-28 rounded-full bg-green-300"
+                initial={{ scale: 0.8, opacity: 0.3 }}
+                animate={{ scale: 1.8, opacity: 0 }}
+                transition={{ duration: 1.4, repeat: Infinity, ease: 'easeOut', delay: 0.5 }}
+            />
+            {/* Circle background with gradient */}
+            <motion.div 
+                className="relative w-24 h-24 rounded-full bg-gradient-to-br from-green-400 to-green-600 flex items-center justify-center shadow-2xl"
+                whileHover={{ scale: 1.05 }}
+                transition={{ type: 'spring', stiffness: 300 }}
+            >
+                <div className="w-[90px] h-[90px] rounded-full bg-green-100 flex items-center justify-center">
+                    <svg
+                        className="w-14 h-14 text-green-600"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={3}
+                        aria-hidden="true"
+                    >
+                        <motion.path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            d="M5 13l4 4L19 7"
+                            initial={{ pathLength: 0, opacity: 0 }}
+                            animate={{ pathLength: 1, opacity: 1 }}
+                            transition={{ duration: 0.6, ease: 'easeOut', delay: 0.35 }}
+                        />
+                    </svg>
+                </div>
+            </motion.div>
         </motion.div>
     );
-}
+});
 
-/** Copy-to-clipboard button with animated feedback */
-function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
+AnimatedCheckmark.displayName = 'AnimatedCheckmark';
+
+/** Copy-to-clipboard button with animated feedback - Memoized for performance */
+const CopyButton = memo(({ text, label = 'Copy' }: { text: string; label?: string }) => {
     const [copied, setCopied] = useState(false);
 
     const handleCopy = useCallback(async () => {
@@ -106,37 +120,45 @@ function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) 
             await navigator.clipboard.writeText(text);
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
-        } catch {
-            // Fallback for older browsers / non-secure contexts
+        } catch (err) {
+            // Fallback for older browsers
             const el = document.createElement('textarea');
             el.value = text;
             el.style.position = 'fixed';
             el.style.opacity = '0';
+            el.setAttribute('aria-hidden', 'true');
             document.body.appendChild(el);
             el.select();
-            document.execCommand('copy');
-            document.body.removeChild(el);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
+            try {
+                document.execCommand('copy');
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+            } catch {
+                console.error('Failed to copy text');
+            } finally {
+                document.body.removeChild(el);
+            }
         }
     }, [text]);
 
     return (
-        <button
+        <motion.button
             onClick={handleCopy}
             className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg transition-all
                        text-gray-500 hover:text-blue-600 hover:bg-blue-50 focus-visible:ring-2 focus-visible:ring-blue-500"
             title={`Copy ${label}`}
             aria-label={copied ? 'Copied!' : `Copy ${label}`}
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
         >
             <AnimatePresence mode="wait" initial={false}>
                 {copied ? (
                     <motion.span
                         key="check"
-                        initial={{ scale: 0.5, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        exit={{ scale: 0.5, opacity: 0 }}
-                        transition={{ duration: 0.15 }}
+                        initial={{ scale: 0.5, opacity: 0, y: 5 }}
+                        animate={{ scale: 1, opacity: 1, y: 0 }}
+                        exit={{ scale: 0.5, opacity: 0, y: -5 }}
+                        transition={{ duration: 0.2, type: 'spring', stiffness: 300 }}
                         className="flex items-center gap-1 text-green-600"
                     >
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -147,10 +169,10 @@ function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) 
                 ) : (
                     <motion.span
                         key="copy"
-                        initial={{ scale: 0.5, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        exit={{ scale: 0.5, opacity: 0 }}
-                        transition={{ duration: 0.15 }}
+                        initial={{ scale: 0.5, opacity: 0, y: 5 }}
+                        animate={{ scale: 1, opacity: 1, y: 0 }}
+                        exit={{ scale: 0.5, opacity: 0, y: -5 }}
+                        transition={{ duration: 0.2, type: 'spring', stiffness: 300 }}
                         className="flex items-center gap-1"
                     >
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -160,9 +182,11 @@ function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) 
                     </motion.span>
                 )}
             </AnimatePresence>
-        </button>
+        </motion.button>
     );
-}
+});
+
+CopyButton.displayName = 'CopyButton';
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
@@ -185,27 +209,10 @@ export function SuccessModal({
                 clearTimeout(t);
                 stopConfetti();
             };
+        } else {
+            stopConfetti();
         }
     }, [isOpen, fireConfetti, stopConfetti]);
-
-    const shareSuccess = useCallback(() => {
-        const shareText = `🎉 I just deployed ${tokenName} (${tokenSymbol}) on Nova Launch!\nToken address: ${tokenAddress}`;
-        const shareUrl = window.location.href;
-
-        if (navigator.share) {
-            navigator
-                .share({ title: `${tokenName} deployed on Nova Launch!`, text: shareText, url: shareUrl })
-                .catch(() => {
-                    // User cancelled — not an error
-                });
-        } else {
-            // Graceful fallback: copy share text
-            navigator.clipboard
-                .writeText(`${shareText}\n${shareUrl}`)
-                .then(() => alert('Share text copied to clipboard!'))
-                .catch(() => alert(`Share: ${shareText}`));
-        }
-    }, [tokenName, tokenSymbol, tokenAddress]);
 
     const explorerUrl = deploymentResult
         ? `https://stellar.expert/explorer/testnet/contract/${tokenAddress}`
@@ -262,7 +269,9 @@ export function SuccessModal({
                         {/* ── Token address card ── */}
                         <motion.div
                             variants={itemVariants}
-                            className="bg-gray-50 border border-gray-200 rounded-xl p-4 mb-4 text-left"
+                            className="bg-gradient-to-br from-gray-50 to-gray-100 border border-gray-200 rounded-xl p-4 mb-4 text-left"
+                            whileHover={{ scale: 1.01, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}
+                            transition={{ type: 'spring', stiffness: 300 }}
                         >
                             <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
                                 Token Address
@@ -320,17 +329,11 @@ export function SuccessModal({
                             className="flex flex-col sm:flex-row gap-3 justify-center"
                         >
                             {/* Share */}
-                            <Button
-                                variant="primary"
-                                onClick={shareSuccess}
-                                className="flex items-center justify-center gap-2"
-                                aria-label="Share your token deployment"
-                            >
-                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
-                                </svg>
-                                Share Success
-                            </Button>
+                            <ShareButton
+                                tokenName={tokenName}
+                                tokenSymbol={tokenSymbol}
+                                tokenAddress={tokenAddress}
+                            />
 
                             {/* View on explorer */}
                             {explorerUrl && (

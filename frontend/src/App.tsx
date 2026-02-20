@@ -1,6 +1,7 @@
 import { Header, Container } from "./components/Layout";
-import { Card, ErrorBoundary } from "./components/UI";
+import { ErrorBoundary } from "./components/UI";
 import { ConnectButton } from "./components/WalletConnect";
+import { TokenDeployForm } from "./components/TokenDeployForm";
 
 function App() {
   return (
@@ -14,12 +15,7 @@ function App() {
         </Header>
         <main id="main-content">
           <Container>
-            <Card title="Deploy Your Token">
-              <p className="text-gray-600">
-                Welcome to Stellar Token Deployer. Connect your wallet to get
-                started.
-              </p>
-            </Card>
+            <TokenDeployForm />
           </Container>
         </main>
       </div>
