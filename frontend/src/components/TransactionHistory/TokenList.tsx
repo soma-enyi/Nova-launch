@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Button } from '../UI/Button';
+import { useState, useEffect, useCallback } from 'react';
+import { Button, SkeletonList } from '../UI';
 import { TokenCard } from './TokenCard';
 import { NoTokensEmptyState, NoWalletEmptyState } from '../UI';
 import type { TokenInfo, WalletState } from '../../types';
@@ -12,58 +12,44 @@ export function TokenList({ wallet }: TokenListProps) {
   const [tokens, setTokens] = useState<TokenInfo[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const loadTokens = async () => {
+  const loadTokens = useCallback(async () => {
     if (!wallet.connected || !wallet.address) return;
 
-        setLoading(true);
-        try {
-            // Load from localStorage for now
-            const stored = localStorage.getItem(`tokens_${wallet.address}`);
-            if (stored) {
-                setTokens(JSON.parse(stored));
-            }
-        } catch (error) {
-            console.error('Failed to load tokens:', error);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    useEffect(() => {
-        loadTokens();
-    }, [wallet.address, wallet.connected]);
-
-    if (!wallet.connected) {
-        return <NoWalletEmptyState />;
+    setLoading(true);
+    try {
+      // Load from localStorage for now
+      const stored = localStorage.getItem(`tokens_${wallet.address}`);
+      if (stored) {
+        setTokens(JSON.parse(stored));
+      }
+    } catch (error) {
+      console.error('Failed to load tokens:', error);
+    } finally {
+      setLoading(false);
     }
-  };
+  }, [wallet.address, wallet.connected]);
 
   useEffect(() => {
     loadTokens();
-  }, [wallet.address, wallet.connected]);
+  }, [loadTokens]);
 
-    if (tokens.length === 0) {
-        return <NoTokensEmptyState />;
-    }
+  if (!wallet.connected) {
+    return <NoWalletEmptyState />;
+  }
 
   if (loading) {
     return (
-      <div className="text-center py-12">
-        <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-        <p className="mt-4 text-gray-600">Loading tokens...</p>
+      <div className="space-y-4">
+        <div className="flex justify-between items-center">
+          <h2 className="text-2xl font-bold text-gray-900">Your Tokens</h2>
+        </div>
+        <SkeletonList count={3} variant="card" />
       </div>
     );
   }
 
   if (tokens.length === 0) {
-    return (
-      <div className="text-center py-12">
-        <p className="text-gray-600 mb-4">No tokens deployed yet</p>
-        <p className="text-sm text-gray-500">
-          Deploy your first token to get started!
-        </p>
-      </div>
-    );
+    return <NoTokensEmptyState />;
   }
 
   return (

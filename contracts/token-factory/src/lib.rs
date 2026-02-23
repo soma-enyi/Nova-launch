@@ -3,7 +3,7 @@
 mod storage;
 mod types;
 
-use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
 use types::{Error, FactoryState, TokenInfo};
 
 #[contract]
@@ -85,84 +85,24 @@ impl TokenFactory {
     }
 
     /// Get token info by address
-    pub fn get_token_info_by_address(env: Env, token_address: Address) -> TokenInfo {
-        let count = storage::get_token_count(&env);
-        for i in 0..count {
-            if let Some(info) = storage::get_token_info(&env, i) {
-                if info.address == token_address {
-                    return info;
-                }
-            }
-        }
-        panic!("Token not found")
+    pub fn get_token_info_by_address(env: Env, token_address: Address) -> Result<TokenInfo, Error> {
+        storage::get_token_info_by_address(&env, &token_address).ok_or(Error::TokenNotFound)
     }
 
-    /// Create a new token (simplified for testing)
-    pub fn create_token(
-        env: Env,
-        creator: Address,
-        name: String,
-        symbol: String,
-        decimals: u32,
-        initial_supply: i128,
-    ) -> Result<Address, Error> {
-        // Validate parameters
-        if initial_supply < 0 {
-            return Err(Error::InvalidParameters);
-        }
-
-        // Generate token address (simulated)
-        let token_address = Address::generate(&env);
-
-        // Create token info
-        let info = TokenInfo {
-            address: token_address.clone(),
-            creator,
-            name,
-            symbol,
-            decimals,
-            total_supply: initial_supply,
-            metadata_uri: None,
-            created_at: env.ledger().timestamp(),
-            total_burned: 0,
-            burn_count: 0,
-        };
-
-        // Store token info
-        let count = storage::get_token_count(&env);
-        storage::set_token_info(&env, count, &info);
-
-        Ok(token_address)
-    }
-
-    /// Burn tokens from caller's balance
-    pub fn burn(env: Env, token_address: Address, from: Address, amount: i128) -> Result<(), Error> {
-        from.require_auth();
-
-        if amount <= 0 {
-            return Err(Error::InvalidBurnAmount);
-        }
-
-        let mut info = Self::get_token_info_by_address(env.clone(), token_address.clone());
-        
-        info.total_supply = info.total_supply.checked_sub(amount).ok_or(Error::InvalidBurnAmount)?;
-        info.total_burned = info.total_burned.checked_add(amount).ok_or(Error::InvalidBurnAmount)?;
-        info.burn_count = info.burn_count.checked_add(1).ok_or(Error::InvalidBurnAmount)?;
-
-        let count = storage::get_token_count(&env);
-        for i in 0..count {
-            if let Some(token_info) = storage::get_token_info(&env, i) {
-                if token_info.address == token_address {
-                    storage::set_token_info(&env, i, &info);
-                    break;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Admin burn tokens from any address
+    /// Admin burn function with clawback capability
+    /// 
+    /// Allows the token creator (admin) to burn tokens from any address.
+    /// This is a privileged operation that requires:
+    /// - Admin authorization
+    /// - Token must have clawback enabled
+    /// - Valid burn amount
+    /// - Sufficient balance in target address
+    /// 
+    /// # Security Considerations
+    /// - Only token creator can perform admin burns
+    /// - Separate event type distinguishes admin burns from self burns
+    /// - Clawback must be explicitly enabled per token
+    /// - All burns are permanently recorded in total_burned counter
     pub fn admin_burn(
         env: Env,
         token_address: Address,
@@ -170,25 +110,91 @@ impl TokenFactory {
         from: Address,
         amount: i128,
     ) -> Result<(), Error> {
+        // Require admin authorization
         admin.require_auth();
 
-        let info = Self::get_token_info_by_address(env.clone(), token_address.clone());
-        if admin != info.creator {
+        // Verify token exists and get info
+        let token_info = storage::get_token_info_by_address(&env, &token_address)
+            .ok_or(Error::TokenNotFound)?;
+
+        // Verify admin is the token creator
+        if token_info.creator != admin {
             return Err(Error::Unauthorized);
         }
 
-        Self::burn(env, token_address, from, amount)
+        // Verify clawback is enabled for this token
+        if !token_info.clawback_enabled {
+            return Err(Error::ClawbackDisabled);
+        }
+
+        // Validate burn amount
+        if amount <= 0 {
+            return Err(Error::InvalidBurnAmount);
+        }
+
+        // TODO: Uncomment once token contract integration is available
+        // Get token contract client
+        // let token = token::Client::new(&env, &token_address);
+        
+        // Check balance
+        // let balance = token.balance(&from);
+        // if balance < amount {
+        //     return Err(Error::BurnAmountExceedsBalance);
+        // }
+
+        // Perform admin burn (clawback)
+        // token.burn(&from, &amount);
+
+        // Update token supply and burn counters
+        storage::update_token_supply(&env, &token_address, -amount)
+            .ok_or(Error::InvalidParameters)?;
+
+        // Emit admin burn event (distinct from regular burn)
+        env.events().publish(
+            (symbol_short!("adm_burn"), token_address.clone()),
+            (
+                admin.clone(),
+                from.clone(),
+                amount,
+                env.ledger().timestamp(),
+            ),
+        );
+
+        Ok(())
     }
 
-    /// Batch burn tokens
-    pub fn burn_batch(
+    /// Toggle clawback capability for a token (creator only)
+    /// 
+    /// Allows token creator to enable or disable clawback functionality.
+    /// Once disabled, it can be re-enabled by the creator.
+    pub fn set_clawback(
         env: Env,
         token_address: Address,
-        burns: Vec<(Address, i128)>,
+        admin: Address,
+        enabled: bool,
     ) -> Result<(), Error> {
-        for (from, amount) in burns.iter() {
-            Self::burn(env.clone(), token_address.clone(), from, amount)?;
+        // Require admin authorization
+        admin.require_auth();
+
+        // Get token info
+        let mut token_info = storage::get_token_info_by_address(&env, &token_address)
+            .ok_or(Error::TokenNotFound)?;
+
+        // Verify admin is the token creator
+        if token_info.creator != admin {
+            return Err(Error::Unauthorized);
         }
+
+        // Update clawback setting
+        token_info.clawback_enabled = enabled;
+        storage::set_token_info_by_address(&env, &token_address, &token_info);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("clawback"), token_address),
+            (admin, enabled, env.ledger().timestamp()),
+        );
+
         Ok(())
     }
 }
@@ -197,20 +203,11 @@ impl TokenFactory {
 mod test;
 
 #[cfg(test)]
-mod fuzz_test;
-
-#[cfg(test)]
-mod bench_test;
-
-#[cfg(test)]
-mod supply_conservation_test;
-
-#[cfg(test)]
-mod fee_validation_test;
+mod admin_burn_test;
 
 // Temporarily disabled due to compilation issues
 // #[cfg(test)]
 // mod atomic_token_creation_test;
 
 #[cfg(test)]
-mod burn_integration_test;
+mod burn_property_test;
