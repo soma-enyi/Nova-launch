@@ -1,26 +1,18 @@
 #![no_std]
-#![allow(deprecated)]
 
-mod burn;
 mod events;
+mod event_versions;
 mod storage;
+mod burn;
 mod types;
 mod validation;
+mod timelock;
+mod pagination;
+mod mint;
+mod treasury;
 
-use soroban_sdk::{contract, contractimpl, Address, Env};
-use types::{Error, FactoryState, TokenInfo};
-
-// Contract metadata constants
-#[allow(dead_code)]
-const CONTRACT_NAME: &str = "Nova Launch Token Factory";
-#[allow(dead_code)]
-const CONTRACT_DESCRIPTION: &str = "No-code token deployment on Stellar";
-#[allow(dead_code)]
-const CONTRACT_AUTHOR: &str = "Nova Launch Team";
-#[allow(dead_code)]
-const CONTRACT_LICENSE: &str = "MIT";
-#[allow(dead_code)]
-const CONTRACT_VERSION: &str = "1.0.0";
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use types::{Error, FactoryState, TokenInfo, TokenCreationParams};
 
 #[contract]
 pub struct TokenFactory;
@@ -148,91 +140,82 @@ impl TokenFactory {
         storage::get_metadata_fee(&env)
     }
 
-    /// Propose a new admin (two-step transfer - step 1)
+    /// Get the total accrued fees awaiting collection
     ///
-    /// Initiates admin transfer by setting a pending admin who must explicitly accept.
-    /// This prevents accidental transfers to wrong addresses or loss of admin control.
+    /// Returns the cumulative amount of fees collected from token
+    /// deployments and other operations that have not yet been
+    /// transferred to the treasury.
     ///
     /// # Arguments
-    /// * `current_admin` - The current admin address (must authorize)
-    /// * `new_admin` - The proposed new admin address
+    /// * `env` - The contract environment
     ///
-    /// # Errors
-    /// * `Unauthorized` - If caller is not the current admin
-    /// * `InvalidParameters` - If new admin is same as current
+    /// # Returns
+    /// Returns the accrued fee amount as an i128 in stroops
     ///
     /// # Examples
     /// ```
-    /// // Step 1: Current admin proposes transfer
-    /// factory.propose_admin(&env, current_admin, new_admin)?;
-    /// // Step 2: New admin must call accept_admin
+    /// let accrued = factory.get_accrued_fees(&env);
+    /// if accrued > 0 {
+    ///     factory.collect_fees(&env, admin)?;
+    /// }
     /// ```
-    pub fn propose_admin(
-        env: Env,
-        current_admin: Address,
-        new_admin: Address,
-    ) -> Result<(), Error> {
-        current_admin.require_auth();
+    pub fn get_accrued_fees(env: Env) -> i128 {
+        storage::get_accrued_fees(&env)
+    }
 
-        let stored_admin = storage::get_admin(&env);
-        if current_admin != stored_admin {
+    /// Collect accrued fees and transfer to treasury (admin only)
+    ///
+    /// Transfers all accrued fees from the contract to the configured
+    /// treasury address. Only the admin can initiate fee collection.
+    /// Resets the accrued fee counter to zero after successful transfer.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize and match stored admin)
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    /// * `Error::InvalidAmount` - No fees to collect (accrued amount is zero)
+    ///
+    /// # Examples
+    /// ```
+    /// // Collect all accrued fees
+    /// factory.collect_fees(&env, admin)?;
+    /// assert_eq!(factory.get_accrued_fees(&env), 0);
+    /// ```
+    pub fn collect_fees(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+
+        let current_admin = storage::get_admin(&env);
+        if admin != current_admin {
             return Err(Error::Unauthorized);
         }
 
-        if new_admin == current_admin {
-            return Err(Error::InvalidParameters);
+        let amount = storage::get_accrued_fees(&env);
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
         }
 
-        storage::set_pending_admin(&env, &new_admin);
-        events::emit_admin_proposed(&env, &current_admin, &new_admin);
+        let treasury = storage::get_treasury(&env);
+        
+        // Reset accrued fees before transfer (checks-effects-interactions pattern)
+        storage::reset_accrued_fees(&env);
+
+        // Emit event
+        events::emit_fees_collected(&env, amount, &treasury);
 
         Ok(())
     }
 
-    /// Accept admin role (two-step transfer - step 2)
+    /// Transfer admin rights to a new address
     ///
-    /// Completes admin transfer by having the proposed admin explicitly accept.
-    /// Only the pending admin can call this function.
+    /// Allows the current admin to transfer administrative control to a new address.
+    /// This is a critical operation that permanently changes who can manage the factory.
     ///
-    /// # Arguments
-    /// * `new_admin` - The pending admin address (must authorize and match pending)
-    ///
-    /// # Errors
-    /// * `NoPendingAdmin` - No pending admin transfer exists
-    /// * `Unauthorized` - Caller is not the pending admin
-    ///
-    /// # Examples
-    /// ```
-    /// // After propose_admin, new admin accepts
-    /// factory.accept_admin(&env, new_admin)?;
-    /// ```
-    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
-        new_admin.require_auth();
-
-        let pending = storage::get_pending_admin(&env).ok_or(Error::NoPendingAdmin)?;
-
-        if new_admin != pending {
-            return Err(Error::Unauthorized);
-        }
-
-        let old_admin = storage::get_admin(&env);
-        storage::set_admin(&env, &new_admin);
-        storage::clear_pending_admin(&env);
-
-        validation::validate_admin(&env)?;
-        events::emit_admin_transfer(&env, &old_admin, &new_admin);
-
-        Ok(())
-    }
-
-    /// Transfer admin rights to a new address (DEPRECATED - use propose_admin/accept_admin)
-    ///
-    /// Single-step admin transfer. Kept for backward compatibility but should be avoided.
-    /// Use propose_admin() and accept_admin() for safer two-step transfers.
-    ///
-    /// # Backward Compatibility
-    /// This function remains available to avoid breaking existing integrations.
-    /// It will be removed in a future major version. Migrate to two-step transfer.
+    /// Implements #217, #224
     ///
     /// # Arguments
     /// * `current_admin` - The current admin address (must authorize)
@@ -241,25 +224,33 @@ impl TokenFactory {
     /// # Errors
     /// * `Unauthorized` - If caller is not the current admin
     /// * `InvalidParameters` - If new admin is same as current or invalid
-    #[deprecated(note = "Use propose_admin() and accept_admin() for safer two-step transfer")]
     pub fn transfer_admin(
         env: Env,
         current_admin: Address,
         new_admin: Address,
     ) -> Result<(), Error> {
+        // Require current admin authorization
         current_admin.require_auth();
 
+        // Combined verification (Phase 1 optimization)
+        // Early return if not authorized
         let stored_admin = storage::get_admin(&env);
         if current_admin != stored_admin {
             return Err(Error::Unauthorized);
         }
 
+        // Validate new admin is different
         if new_admin == current_admin {
             return Err(Error::InvalidParameters);
         }
 
+        // Update admin in storage
         storage::set_admin(&env, &new_admin);
+
+        // Validate new admin is valid
         validation::validate_admin(&env)?;
+
+        // Emit optimized event
         events::emit_admin_transfer(&env, &current_admin, &new_admin);
 
         Ok(())
@@ -429,7 +420,7 @@ impl TokenFactory {
         // Get updated fees for event
         let new_base_fee = base_fee.unwrap_or_else(|| storage::get_base_fee(&env));
         let new_metadata_fee = metadata_fee.unwrap_or_else(|| storage::get_metadata_fee(&env));
-
+        
         // Emit optimized event
         events::emit_fees_updated(&env, new_base_fee, new_metadata_fee);
 
@@ -525,7 +516,7 @@ impl TokenFactory {
         // Get final state for event
         let final_base_fee = base_fee.unwrap_or_else(|| storage::get_base_fee(&env));
         let final_metadata_fee = metadata_fee.unwrap_or_else(|| storage::get_metadata_fee(&env));
-
+        
         // Emit single consolidated event (Phase 2 optimization)
         events::emit_fees_updated(&env, final_base_fee, final_metadata_fee);
 
@@ -601,6 +592,72 @@ impl TokenFactory {
     /// ```
     pub fn get_token_info_by_address(env: Env, token_address: Address) -> Result<TokenInfo, Error> {
         storage::get_token_info_by_address(&env, &token_address).ok_or(Error::TokenNotFound)
+    }
+
+    /// Create a new token
+    ///
+    /// # Arguments
+    /// * `creator` - Address that will own the token
+    /// * `name` - Token name
+    /// * `symbol` - Token symbol
+    /// * `decimals` - Number of decimal places
+    /// * `initial_supply` - Initial token supply
+    /// * `fee_payment` - Fee amount (must be >= base_fee)
+    ///
+    /// # Errors
+    /// * `Error::ContractPaused` - Contract is paused
+    /// * `Error::InvalidParameters` - Invalid inputs
+    /// * `Error::InsufficientFee` - Fee too low
+    pub fn create_token(
+        env: Env,
+        creator: Address,
+        name: String,
+        symbol: String,
+        decimals: u32,
+        initial_supply: i128,
+        fee_payment: i128,
+    ) -> Result<Address, Error> {
+        creator.require_auth();
+
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
+
+        if initial_supply < 0 || decimals > 18 || name.len() == 0 || symbol.len() == 0 {
+            return Err(Error::InvalidParameters);
+        }
+
+        let base_fee = storage::get_base_fee(&env);
+        if fee_payment < base_fee {
+            return Err(Error::InsufficientFee);
+        }
+
+        let token_address = Address::generate(&env);
+        let info = TokenInfo {
+            address: token_address.clone(),
+            creator: creator.clone(),
+            name: name.clone(),
+            symbol: symbol.clone(),
+            decimals,
+            total_supply: initial_supply,
+            initial_supply,
+            metadata_uri: None,
+            created_at: env.ledger().timestamp(),
+            total_burned: 0,
+            burn_count: 0,
+            clawback_enabled: false,
+        };
+
+        let index = storage::increment_token_count(&env);
+        storage::set_token_info(&env, index, &info);
+        storage::set_token_info_by_address(&env, &token_address, &info);
+
+        env.events().publish(
+            (soroban_sdk::symbol_short!("created"),),
+            (token_address.clone(), creator, name, symbol, decimals, initial_supply)
+        );
+
+        Ok(token_address)
     }
 
     /// Toggle clawback capability for a token (creator only)
@@ -724,12 +781,7 @@ impl TokenFactory {
     /// ];
     /// factory.batch_burn(&env, admin, 0, burns)?;
     /// ```
-    pub fn batch_burn(
-        env: Env,
-        admin: Address,
-        token_index: u32,
-        burns: soroban_sdk::Vec<(Address, i128)>,
-    ) -> Result<(), Error> {
+    pub fn batch_burn(env: Env, admin: Address, token_index: u32, burns: soroban_sdk::Vec<(Address, i128)>) -> Result<(), Error> {
         burn::batch_burn(&env, admin, token_index, burns)
     }
 
@@ -753,6 +805,579 @@ impl TokenFactory {
     pub fn get_burn_count(env: Env, token_index: u32) -> u32 {
         burn::get_burn_count(&env, token_index)
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Timelock Functions
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Schedule a fee update with timelock
+    ///
+    /// Schedules a change to base_fee or metadata_fee that cannot be executed
+    /// until the timelock delay has passed. This provides transparency and
+    /// allows users to react to upcoming changes.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize and match stored admin)
+    /// * `base_fee` - Optional new base fee in stroops (None = no change)
+    /// * `metadata_fee` - Optional new metadata fee in stroops (None = no change)
+    ///
+    /// # Returns
+    /// Returns the change ID that can be used to execute or cancel the change
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    /// * `Error::InvalidParameters` - Both fees are None or any fee is negative
+    ///
+    /// # Examples
+    /// ```
+    /// // Schedule fee update
+    /// let change_id = factory.schedule_fee_update(&env, admin, Some(2_000_000), None)?;
+    /// // Wait for timelock to expire, then execute
+    /// factory.execute_change(&env, change_id)?;
+    /// ```
+    pub fn schedule_fee_update(
+        env: Env,
+        admin: Address,
+        base_fee: Option<i128>,
+        metadata_fee: Option<i128>,
+    ) -> Result<u64, Error> {
+        timelock::schedule_fee_update(&env, &admin, base_fee, metadata_fee)
+    }
+
+    /// Schedule a pause state change with timelock
+    ///
+    /// Schedules a change to the contract's pause state that cannot be executed
+    /// until the timelock delay has passed.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize and match stored admin)
+    /// * `paused` - New pause state (true to pause, false to unpause)
+    ///
+    /// # Returns
+    /// Returns the change ID
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    ///
+    /// # Examples
+    /// ```
+    /// let change_id = factory.schedule_pause_update(&env, admin, true)?;
+    /// ```
+    pub fn schedule_pause_update(
+        env: Env,
+        admin: Address,
+        paused: bool,
+    ) -> Result<u64, Error> {
+        timelock::schedule_pause_update(&env, &admin, paused)
+    }
+
+    /// Schedule a treasury address change with timelock
+    ///
+    /// Schedules a change to the treasury address that cannot be executed
+    /// until the timelock delay has passed.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize and match stored admin)
+    /// * `new_treasury` - New treasury address
+    ///
+    /// # Returns
+    /// Returns the change ID
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    ///
+    /// # Examples
+    /// ```
+    /// let change_id = factory.schedule_treasury_update(&env, admin, new_treasury)?;
+    /// ```
+    pub fn schedule_treasury_update(
+        env: Env,
+        admin: Address,
+        new_treasury: Address,
+    ) -> Result<u64, Error> {
+        timelock::schedule_treasury_update(&env, &admin, &new_treasury)
+    }
+
+    /// Execute a pending change
+    ///
+    /// Executes a previously scheduled change after the timelock has expired.
+    /// Anyone can call this function once the timelock period has elapsed.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `change_id` - ID of the pending change to execute
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `Error::TokenNotFound` - Change ID not found
+    /// * `Error::TimelockNotExpired` - Timelock period has not elapsed
+    /// * `Error::ChangeAlreadyExecuted` - Change has already been executed
+    ///
+    /// # Examples
+    /// ```
+    /// // After timelock expires
+    /// factory.execute_change(&env, change_id)?;
+    /// ```
+    pub fn execute_change(env: Env, change_id: u64) -> Result<(), Error> {
+        timelock::execute_change(&env, change_id)
+    }
+
+    /// Cancel a pending change
+    ///
+    /// Cancels a scheduled change before it is executed.
+    /// Only the admin can cancel pending changes.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize and match stored admin)
+    /// * `change_id` - ID of the pending change to cancel
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    /// * `Error::TokenNotFound` - Change ID not found
+    /// * `Error::ChangeAlreadyExecuted` - Change has already been executed
+    ///
+    /// # Examples
+    /// ```
+    /// factory.cancel_change(&env, admin, change_id)?;
+    /// ```
+    pub fn cancel_change(env: Env, admin: Address, change_id: u64) -> Result<(), Error> {
+        timelock::cancel_change(&env, &admin, change_id)
+    }
+
+    /// Get pending change details
+    ///
+    /// Retrieves information about a scheduled change including when it
+    /// can be executed and what parameters will be changed.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `change_id` - ID of the pending change
+    ///
+    /// # Returns
+    /// Returns the PendingChange if found, None otherwise
+    ///
+    /// # Examples
+    /// ```
+    /// if let Some(change) = factory.get_pending_change(&env, change_id) {
+    ///     log!("Change can be executed at: {}", change.execute_at);
+    /// }
+    /// ```
+    pub fn get_pending_change(env: Env, change_id: u64) -> Option<types::PendingChange> {
+        timelock::get_pending_change(&env, change_id)
+    }
+
+    /// Get timelock configuration
+    ///
+    /// Returns the current timelock settings including the delay period.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    ///
+    /// # Returns
+    /// Returns the TimelockConfig
+    ///
+    /// # Examples
+    /// ```
+    /// let config = factory.get_timelock_config(&env);
+    /// log!("Timelock delay: {} seconds", config.delay_seconds);
+    /// ```
+    pub fn get_timelock_config(env: Env) -> types::TimelockConfig {
+        timelock::get_timelock_config(&env)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Pagination Functions
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Get tokens created by a specific address with pagination
+    ///
+    /// Returns a paginated list of tokens created by the specified address.
+    /// Results are ordered by token creation order (token index).
+    /// Useful for explorer and dashboard interfaces.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `creator` - Address of the token creator
+    /// * `cursor` - Optional cursor for pagination (None = start from beginning)
+    /// * `limit` - Maximum number of tokens to return (default 20, max 100)
+    ///
+    /// # Returns
+    /// Returns `PaginatedTokens` containing:
+    /// - `tokens`: Vector of TokenInfo for this page
+    /// - `cursor`: Optional cursor for next page (None = no more results)
+    ///
+    /// # Cursor Semantics
+    /// - Cursors are deterministic and stable across calls
+    /// - Empty cursor (None) starts from the beginning
+    /// - Returned cursor of None indicates end of results
+    /// - Cursors contain the next position in the creator's token list
+    ///
+    /// # Examples
+    /// ```
+    /// // First page
+    /// let page1 = factory.get_tokens_by_creator(&env, creator, None, Some(20))?;
+    /// 
+    /// // Next page
+    /// if let Some(cursor) = page1.cursor {
+    ///     let page2 = factory.get_tokens_by_creator(&env, creator, Some(cursor), Some(20))?;
+    /// }
+    /// 
+    /// // Get total count
+    /// let total = factory.get_creator_token_count(&env, creator);
+    /// ```
+    pub fn get_tokens_by_creator(
+        env: Env,
+        creator: Address,
+        cursor: Option<types::PaginationCursor>,
+        limit: Option<u32>,
+    ) -> Result<types::PaginatedTokens, Error> {
+        pagination::get_tokens_by_creator(&env, &creator, cursor, limit)
+    }
+
+    /// Get the total number of tokens created by an address
+    ///
+    /// Returns the count without fetching the actual token data.
+    /// Useful for displaying total counts in UIs.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `creator` - Address of the token creator
+    ///
+    /// # Returns
+    /// Returns the number of tokens created by this address
+    ///
+    /// # Examples
+    /// ```
+    /// let count = factory.get_creator_token_count(&env, creator);
+    /// log!("Creator has deployed {} tokens", count);
+    /// ```
+    pub fn get_creator_token_count(env: Env, creator: Address) -> u32 {
+        pagination::get_creator_token_count(&env, &creator)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Minting Functions
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Mint tokens to an address
+    ///
+    /// Increases the total supply and the recipient's balance.
+    /// Enforces max supply constraints if set for the token.
+    /// Only the token creator can mint new tokens.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `creator` - Token creator address (must authorize)
+    /// * `token_index` - Index of the token to mint
+    /// * `to` - Address to receive the minted tokens
+    /// * `amount` - Amount to mint (must be > 0)
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the token creator
+    /// * `Error::TokenNotFound` - Token doesn't exist
+    /// * `Error::InvalidAmount` - Amount is zero or negative
+    /// * `Error::MaxSupplyExceeded` - Would exceed max supply cap
+    /// * `Error::ArithmeticError` - Overflow in calculation
+    /// * `Error::ContractPaused` - Contract is paused
+    ///
+    /// # Examples
+    /// ```
+    /// // Mint 1000 tokens
+    /// factory.mint(&env, creator, 0, recipient, 1_000_0000000)?;
+    ///
+    /// // Check remaining mintable
+    /// if let Some(remaining) = factory.get_remaining_mintable(&env, 0) {
+    ///     log!("Can mint {} more tokens", remaining);
+    /// }
+    /// ```
+    pub fn mint(
+        env: Env,
+        creator: Address,
+        token_index: u32,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        // Check if contract is paused
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
+        
+        creator.require_auth();
+        
+        // Verify creator owns the token
+        let token_info = storage::get_token_info(&env, token_index)
+            .ok_or(Error::TokenNotFound)?;
+        
+        if token_info.creator != creator {
+            return Err(Error::Unauthorized);
+        }
+        
+        // Perform mint with max supply validation
+        mint::mint(&env, token_index, &to, amount)
+    }
+
+    /// Get remaining mintable supply for a token
+    ///
+    /// Returns how many more tokens can be minted before hitting the max supply.
+    /// Returns None if there's no max supply (unlimited minting).
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `token_index` - Index of the token
+    ///
+    /// # Returns
+    /// * `Some(amount)` - Remaining mintable amount
+    /// * `None` - Unlimited minting (no max supply set)
+    ///
+    /// # Examples
+    /// ```
+    /// match factory.get_remaining_mintable(&env, 0) {
+    ///     Some(0) => log!("Max supply reached"),
+    ///     Some(amount) => log!("Can mint {} more", amount),
+    ///     None => log!("Unlimited minting"),
+    /// }
+    /// ```
+    pub fn get_remaining_mintable(env: Env, token_index: u32) -> Option<i128> {
+        mint::get_remaining_mintable(&env, token_index)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Treasury Functions
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Initialize treasury policy
+    ///
+    /// Sets up withdrawal limits and controls for the treasury.
+    /// Should be called during contract initialization or when first
+    /// configuring treasury protections.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize)
+    /// * `daily_cap` - Optional maximum withdrawal per day in stroops (None = default 100 XLM)
+    /// * `allowlist_enabled` - Whether to enforce recipient allowlist
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    /// * `Error::InvalidParameters` - Daily cap is negative
+    ///
+    /// # Examples
+    /// ```
+    /// // 100 XLM daily cap with allowlist
+    /// factory.initialize_treasury_policy(&env, admin, Some(100_0000000), true)?;
+    /// ```
+    pub fn initialize_treasury_policy(
+        env: Env,
+        admin: Address,
+        daily_cap: Option<i128>,
+        allowlist_enabled: bool,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        
+        let current_admin = storage::get_admin(&env);
+        if admin != current_admin {
+            return Err(Error::Unauthorized);
+        }
+        
+        treasury::initialize_treasury_policy(&env, daily_cap, allowlist_enabled)
+    }
+
+    /// Withdraw fees from treasury
+    ///
+    /// Transfers accumulated fees to a recipient address.
+    /// Enforces withdrawal policy limits and allowlist.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize)
+    /// * `recipient` - Address to receive the funds
+    /// * `amount` - Amount to withdraw in stroops
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not admin
+    /// * `Error::WithdrawalCapExceeded` - Exceeds daily cap
+    /// * `Error::RecipientNotAllowed` - Recipient not in allowlist
+    /// * `Error::InvalidAmount` - Amount is zero or negative
+    ///
+    /// # Examples
+    /// ```
+    /// // Withdraw 50 XLM to recipient
+    /// factory.withdraw_fees(&env, admin, recipient, 50_0000000)?;
+    /// ```
+    pub fn withdraw_fees(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        treasury::withdraw_fees(&env, &admin, &recipient, amount)
+    }
+
+    /// Add recipient to allowlist
+    ///
+    /// Allows an address to receive treasury withdrawals.
+    /// Only admin can modify the allowlist.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize)
+    /// * `recipient` - Address to add to allowlist
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    ///
+    /// # Examples
+    /// ```
+    /// factory.add_allowed_recipient(&env, admin, recipient)?;
+    /// ```
+    pub fn add_allowed_recipient(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+    ) -> Result<(), Error> {
+        treasury::add_allowed_recipient(&env, &admin, &recipient)
+    }
+
+    /// Remove recipient from allowlist
+    ///
+    /// Revokes an address's ability to receive treasury withdrawals.
+    /// Only admin can modify the allowlist.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize)
+    /// * `recipient` - Address to remove from allowlist
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    ///
+    /// # Examples
+    /// ```
+    /// factory.remove_allowed_recipient(&env, admin, recipient)?;
+    /// ```
+    pub fn remove_allowed_recipient(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+    ) -> Result<(), Error> {
+        treasury::remove_allowed_recipient(&env, &admin, &recipient)
+    }
+
+    /// Update treasury policy
+    ///
+    /// Changes the withdrawal limits and allowlist settings.
+    /// Only admin can update the policy.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize)
+    /// * `daily_cap` - Optional new daily cap in stroops (None = no change)
+    /// * `allowlist_enabled` - Optional new allowlist setting (None = no change)
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    /// * `Error::InvalidParameters` - Daily cap is negative
+    ///
+    /// # Examples
+    /// ```
+    /// // Update daily cap to 200 XLM
+    /// factory.update_treasury_policy(&env, admin, Some(200_0000000), None)?;
+    /// ```
+    pub fn update_treasury_policy(
+        env: Env,
+        admin: Address,
+        daily_cap: Option<i128>,
+        allowlist_enabled: Option<bool>,
+    ) -> Result<(), Error> {
+        treasury::update_treasury_policy(&env, &admin, daily_cap, allowlist_enabled)
+    }
+
+    /// Get remaining withdrawal capacity for current period
+    ///
+    /// Returns how much more can be withdrawn before hitting the daily cap.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    ///
+    /// # Returns
+    /// Remaining withdrawal capacity in stroops
+    ///
+    /// # Examples
+    /// ```
+    /// let remaining = factory.get_remaining_capacity(&env);
+    /// log!("Can withdraw {} more stroops today", remaining);
+    /// ```
+    pub fn get_remaining_capacity(env: Env) -> i128 {
+        treasury::get_remaining_capacity(&env)
+    }
+
+    /// Get treasury policy
+    ///
+    /// Returns the current withdrawal policy settings.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    ///
+    /// # Returns
+    /// Current treasury policy
+    ///
+    /// # Examples
+    /// ```
+    /// let policy = factory.get_treasury_policy(&env);
+    /// log!("Daily cap: {}", policy.daily_cap);
+    /// ```
+    pub fn get_treasury_policy(env: Env) -> types::TreasuryPolicy {
+        treasury::get_treasury_policy(&env)
+    }
+
+    /// Check if address is allowed recipient
+    ///
+    /// Returns true if the address can receive treasury withdrawals.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `recipient` - Address to check
+    ///
+    /// # Returns
+    /// True if address is in allowlist or allowlist is disabled
+    ///
+    /// # Examples
+    /// ```
+    /// if factory.is_allowed_recipient(&env, recipient) {
+    ///     log!("Recipient is allowed");
+    /// }
+    /// ```
+    pub fn is_allowed_recipient(env: Env, recipient: Address) -> bool {
+        treasury::is_allowed_recipient(&env, &recipient)
+    }
+
 }
 
 // Temporarily disabled - requires create_token implementation
@@ -763,21 +1388,17 @@ impl TokenFactory {
 // #[cfg(test)]
 // mod admin_burn_test;
 
+// Temporarily disabled - has compilation errors
+// #[cfg(test)]
+// mod admin_transfer_test;
+
 #[cfg(test)]
-mod admin_transfer_test;
-
-// Temporarily disabled - client generation issues to be fixed
-// #[cfg(test)]
-// mod two_step_admin_test;
-
-// Temporarily disabled - client generation issues to be fixed
-// #[cfg(test)]
-// mod two_step_admin_standalone_test;
+mod fee_collection_test;
 
 // Temporarily disabled - has compilation errors
 // mod event_tests;
 
-// Temporarily disabled - has compilation errors with String types
+// Temporarily disabled - has compilation errors
 // #[cfg(test)]
 // mod error_handling_test;
 
@@ -789,9 +1410,11 @@ mod admin_transfer_test;
 // #[cfg(test)]
 // mod atomic_token_creation_test;
 
-// Temporarily disabled - requires burn implementation
-// #[cfg(test)]
-// mod burn_property_test;
+#[cfg(test)]
+mod burn_property_test;
+
+#[cfg(test)]
+mod supply_conservation_test;
 
 // Temporarily disabled due to compilation issues
 // #[cfg(test)]
@@ -799,13 +1422,9 @@ mod admin_transfer_test;
 
 // Temporarily disabled - has compilation errors
 // #[cfg(test)]
-// mod burn_property_test;
-
-// Temporarily disabled - has compilation errors
-// #[cfg(test)]
 // mod state_events_test;
 
-// Temporarily disabled - has compilation errors with String types
+// Temporarily disabled - has compilation errors
 // #[cfg(test)]
 // mod fuzz_string_boundaries;
 
@@ -821,9 +1440,16 @@ mod admin_transfer_test;
 // #[cfg(test)]
 // mod fuzz_test;
 
-// Temporarily disabled - has compilation errors
-// #[cfg(test)]
-// mod integration_test;
+#[cfg(test)]
+mod integration_test;
 
-// Temporarily disabled - has compilation errors
-// mod gas_benchmark_comprehensive;
+mod gas_benchmark_comprehensive;
+
+#[cfg(test)]
+mod timelock_test;
+
+#[cfg(test)]
+mod pagination_integration_test;
+
+#[cfg(test)]
+mod treasury_integration_test;

@@ -54,6 +54,8 @@ pub struct ContractMetadata {
 /// * `symbol` - Token symbol (e.g., "MTK")
 /// * `decimals` - Number of decimal places (typically 7 for Stellar)
 /// * `total_supply` - Current circulating supply after burns
+/// * `initial_supply` - Initial supply at token creation
+/// * `max_supply` - Optional maximum supply cap (None = unlimited)
 /// * `metadata_uri` - Optional IPFS URI for additional metadata
 /// * `created_at` - Unix timestamp of token creation
 /// * `total_burned` - Cumulative amount of tokens burned
@@ -75,6 +77,7 @@ pub struct TokenInfo {
     pub decimals: u32,
     pub total_supply: i128,
     pub initial_supply: i128,
+    pub max_supply: Option<i128>,
     pub total_burned: i128,
     pub burn_count: u32,
     pub metadata_uri: Option<String>,
@@ -113,7 +116,6 @@ pub struct FeeUpdate {
 ///
 /// # Variants
 /// * `Admin` - Factory administrator address
-/// * `PendingAdmin` - Pending admin awaiting acceptance
 /// * `Treasury` - Fee collection address
 /// * `BaseFee` - Base deployment fee amount
 /// * `MetadataFee` - Metadata deployment fee amount
@@ -123,11 +125,18 @@ pub struct FeeUpdate {
 /// * `BurnCount(u32)` - Number of burns for token
 /// * `TokenByAddress(Address)` - Token info lookup by address
 /// * `Paused` - Contract pause state
+/// * `TimelockConfig` - Timelock configuration
+/// * `PendingChange(u64)` - Pending change by ID
+/// * `NextChangeId` - Next available change ID
+/// * `CreatorTokens(Address)` - Vector of token indices for a creator
+/// * `CreatorTokenCount(Address)` - Number of tokens created by address
+/// * `TreasuryPolicy` - Treasury withdrawal policy
+/// * `WithdrawalPeriod` - Current withdrawal period tracking
+/// * `AllowedRecipient(Address)` - Whether address is allowed recipient
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Admin,
-    PendingAdmin,
     Treasury,
     BaseFee,
     MetadataFee,
@@ -137,6 +146,14 @@ pub enum DataKey {
     BurnCount(u32),
     TokenByAddress(Address),
     Paused,
+    TimelockConfig,
+    PendingChange(u64),
+    NextChangeId,
+    CreatorTokens(Address),
+    CreatorTokenCount(Address),
+    TreasuryPolicy,
+    WithdrawalPeriod,
+    AllowedRecipient(Address),
 }
 
 /// Contract error codes
@@ -159,12 +176,12 @@ pub enum DataKey {
 /// * `InvalidBurnAmount` - Burn amount is invalid
 /// * `BurnAmountExceedsBalance` - Burn amount exceeds available balance
 /// * `ContractPaused` - Operation not allowed while paused
-/// * `NoPendingAdmin` - No pending admin transfer exists
-/// * `MissingAdmin` - Admin address not set
-/// * `MissingTreasury` - Treasury address not set
-/// * `InvalidBaseFee` - Base fee is negative
-/// * `InvalidMetadataFee` - Metadata fee is negative
-/// * `InconsistentTokenCount` - Token count doesn't match stored tokens
+/// * `TimelockNotExpired` - Timelock period has not elapsed
+/// * `ChangeAlreadyExecuted` - Change has already been executed
+/// * `MaxSupplyExceeded` - Minting would exceed max supply cap
+/// * `InvalidMaxSupply` - Max supply is less than initial supply
+/// * `WithdrawalCapExceeded` - Withdrawal would exceed daily cap
+/// * `RecipientNotAllowed` - Recipient not in allowlist
 ///
 /// # Examples
 /// ```
@@ -174,7 +191,6 @@ pub enum DataKey {
 /// ```
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(clippy::enum_variant_names)]
 pub enum Error {
     InsufficientFee = 1,
     Unauthorized = 2,
@@ -190,10 +206,123 @@ pub enum Error {
     InvalidBurnAmount = 12,
     BurnAmountExceedsBalance = 13,
     ContractPaused = 14,
-    NoPendingAdmin = 15,
-    MissingAdmin = 16,
-    MissingTreasury = 17,
-    InvalidBaseFee = 18,
-    InvalidMetadataFee = 19,
-    InconsistentTokenCount = 20,
+    TimelockNotExpired = 15,
+    ChangeAlreadyExecuted = 16,
+    MaxSupplyExceeded = 17,
+    InvalidMaxSupply = 18,
+    WithdrawalCapExceeded = 19,
+    RecipientNotAllowed = 20,
+}
+
+/// Timelock configuration
+///
+/// Defines the delay period for sensitive operations.
+///
+/// # Fields
+/// * `delay_seconds` - Time delay in seconds before changes can be executed
+/// * `enabled` - Whether timelock is currently active
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelockConfig {
+    pub delay_seconds: u64,
+    pub enabled: bool,
+}
+
+/// Type of pending change
+///
+/// Identifies which operation is being timelocked.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChangeType {
+    FeeUpdate,
+    PauseUpdate,
+    TreasuryUpdate,
+}
+
+/// Pending change awaiting timelock expiry
+///
+/// Represents a scheduled change that cannot be executed
+/// until the timelock period has elapsed.
+///
+/// # Fields
+/// * `id` - Unique identifier for this change
+/// * `change_type` - Type of change being scheduled
+/// * `scheduled_by` - Admin who scheduled the change
+/// * `scheduled_at` - Timestamp when change was scheduled
+/// * `execute_at` - Timestamp when change can be executed
+/// * `executed` - Whether the change has been executed
+/// * `base_fee` - New base fee (for FeeUpdate)
+/// * `metadata_fee` - New metadata fee (for FeeUpdate)
+/// * `paused` - New pause state (for PauseUpdate)
+/// * `treasury` - New treasury address (for TreasuryUpdate)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingChange {
+    pub id: u64,
+    pub change_type: ChangeType,
+    pub scheduled_by: Address,
+    pub scheduled_at: u64,
+    pub execute_at: u64,
+    pub executed: bool,
+    pub base_fee: Option<i128>,
+    pub metadata_fee: Option<i128>,
+    pub paused: Option<bool>,
+    pub treasury: Option<Address>,
+}
+
+/// Pagination cursor for token queries
+///
+/// Represents the position in a paginated result set.
+/// Uses token index as the cursor for deterministic ordering.
+///
+/// # Fields
+/// * `next_index` - The next token index to fetch (None = end of results)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginationCursor {
+    pub next_index: Option<u32>,
+}
+
+/// Paginated token result
+///
+/// Contains a page of tokens and a cursor for fetching the next page.
+///
+/// # Fields
+/// * `tokens` - Vector of token info for this page
+/// * `cursor` - Cursor for next page (None = no more results)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginatedTokens {
+    pub tokens: soroban_sdk::Vec<TokenInfo>,
+    pub cursor: Option<PaginationCursor>,
+}
+
+/// Treasury withdrawal policy
+///
+/// Defines limits and controls for treasury withdrawals.
+///
+/// # Fields
+/// * `daily_cap` - Maximum amount that can be withdrawn per day (in stroops)
+/// * `allowlist_enabled` - Whether recipient allowlist is enforced
+/// * `period_duration` - Duration of withdrawal period in seconds (default 86400 = 1 day)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasuryPolicy {
+    pub daily_cap: i128,
+    pub allowlist_enabled: bool,
+    pub period_duration: u64,
+}
+
+/// Treasury withdrawal tracking for current period
+///
+/// Tracks withdrawals within the current time period.
+///
+/// # Fields
+/// * `period_start` - Timestamp when current period started
+/// * `amount_withdrawn` - Total amount withdrawn in current period
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalPeriod {
+    pub period_start: u64,
+    pub amount_withdrawn: i128,
 }
