@@ -243,6 +243,7 @@ pub enum Error {
     StreamNotFound = 29,
     StreamCancelled = 30,
     NothingToClaim = 31,
+    StreamPaused = 32,
 }
 
 /// Type of pending change
@@ -372,6 +373,7 @@ pub struct StreamInfo {
     pub end_time: u64,
     pub cliff_time: u64,
     pub cancelled: bool,
+    pub paused: bool,
 }
 
 /// Stream creation parameters
