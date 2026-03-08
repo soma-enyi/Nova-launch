@@ -1,9 +1,6 @@
 use super::*;
 use proptest::prelude::*;
-use soroban_sdk::{
-    testutils::{Address as _},
-    Address, Env,
-};
+use soroban_sdk::{testutils::Address as _, Address, Env};
 
 // Property-based tests for token supply conservation
 // These tests verify fundamental properties that must hold for any token implementation
@@ -44,7 +41,7 @@ proptest! {
         client.initialize(&admin, &treasury, &base_fee, &metadata_fee);
 
         let state = client.get_state();
-        
+
         // Property: initialized state matches input parameters
         prop_assert_eq!(state.admin, admin);
         prop_assert_eq!(state.treasury, treasury);
@@ -60,22 +57,22 @@ proptest! {
         new_base_fee in 1i128..1_000_000i128,
         new_metadata_fee in 1i128..1_000_000i128,
     ) {
-        let (env, client, admin, treasury) = setup_test_env();
+        let (_env, client, admin, treasury) = setup_test_env();
 
         // Set initial fees
         client.update_fees(&admin, &Some(initial_base_fee), &Some(initial_metadata_fee));
-        
-        let state_before = client.get_state();
+
+        let _state_before = client.get_state();
 
         // Update fees
         client.update_fees(&admin, &Some(new_base_fee), &Some(new_metadata_fee));
-        
+
         let state_after = client.get_state();
 
         // Property: admin and treasury unchanged
         prop_assert_eq!(state_after.admin, admin);
         prop_assert_eq!(state_after.treasury, treasury);
-        
+
         // Property: fees updated correctly
         prop_assert_eq!(state_after.base_fee, new_base_fee);
         prop_assert_eq!(state_after.metadata_fee, new_metadata_fee);
@@ -87,14 +84,14 @@ proptest! {
         fee_value in 1i128..1_000_000i128,
         update_count in 1usize..10,
     ) {
-        let (env, client, admin, _treasury) = setup_test_env();
+        let (_env, client, admin, _treasury) = setup_test_env();
 
         for _ in 0..update_count {
             client.update_fees(&admin, &Some(fee_value), &None);
         }
 
         let state = client.get_state();
-        
+
         // Property: repeated updates with same value result in that value
         prop_assert_eq!(state.base_fee, fee_value);
     }
@@ -104,13 +101,13 @@ proptest! {
     fn test_token_count_monotonic(
         _operation_count in 1usize..20,
     ) {
-        let (env, client, _admin, _treasury) = setup_test_env();
+        let (_env, client, _admin, _treasury) = setup_test_env();
 
         let initial_count = client.get_token_count();
-        
+
         // Property: initial count is zero for new factory
         prop_assert_eq!(initial_count, 0);
-        
+
         // Property: count never decreases (tested with current implementation)
         let count_after = client.get_token_count();
         prop_assert!(count_after >= initial_count);
@@ -151,10 +148,10 @@ proptest! {
         fee1 in 0i128..1_000_000i128,
         fee2 in 0i128..1_000_000i128,
     ) {
-        let (env, client, admin, _treasury) = setup_test_env();
+        let (_env, client, admin, _treasury) = setup_test_env();
 
         client.update_fees(&admin, &Some(fee1), &Some(fee2));
-        
+
         let state = client.get_state();
 
         // Property: fees are never negative

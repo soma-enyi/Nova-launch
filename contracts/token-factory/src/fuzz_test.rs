@@ -3,47 +3,6 @@ use proptest::prelude::*;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::Address;
 
-// Strategy for generating valid token names (1-32 chars)
-fn token_name_strategy() -> impl Strategy<Value = &'static str> {
-    prop_oneof![
-        Just("Test Token"),
-        Just("My Token"),
-        Just("A"),
-        Just("ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"),
-    ]
-}
-
-// Strategy for generating valid token symbols (1-12 chars)
-fn token_symbol_strategy() -> impl Strategy<Value = &'static str> {
-    prop_oneof![Just("TEST"), Just("TKN"), Just("A"), Just("ABCDEFGHIJKL"),]
-}
-
-// Strategy for generating edge case strings
-fn edge_case_string_strategy() -> impl Strategy<Value = &'static str> {
-    prop_oneof![
-        Just(""),
-        Just("a"),
-        Just("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-    ]
-}
-
-// Strategy for decimals (0-18 is typical, test beyond)
-fn decimals_strategy() -> impl Strategy<Value = u32> {
-    prop_oneof![Just(0u32), Just(7u32), Just(18u32), Just(255u32),]
-}
-
-// Strategy for supply amounts
-fn supply_strategy() -> impl Strategy<Value = i128> {
-    prop_oneof![
-        Just(0i128),
-        Just(1i128),
-        Just(-1i128),
-        Just(i128::MAX),
-        Just(i128::MIN),
-        1i128..1_000_000_000_000i128,
-    ]
-}
-
 // Strategy for fee amounts
 fn fee_strategy() -> impl Strategy<Value = i128> {
     prop_oneof![
