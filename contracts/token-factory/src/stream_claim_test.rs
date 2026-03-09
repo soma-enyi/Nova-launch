@@ -217,7 +217,7 @@ fn test_claim_full_vesting() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #29)")]
+#[should_panic(expected = "Error(Contract, #65)")]
 fn test_claim_nothing_to_claim() {
     let (env, client, _admin, _treasury) = setup();
     
@@ -272,7 +272,7 @@ fn test_claim_unauthorized() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #26)")]
+#[should_panic(expected = "Error(Contract, #27)")]
 fn test_claim_nonexistent_stream() {
     let (env, client, _admin, _treasury) = setup();
     

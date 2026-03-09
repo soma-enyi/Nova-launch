@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use soroban_sdk::{contracterror, contracttype, Address, Bytes, String, Vec};
+use soroban_sdk::{self, contracterror, contracttype, Address, Bytes, BytesN, String, Vec};
 
 /// Factory state containing administrative configuration
 ///
@@ -86,6 +86,60 @@ pub struct TokenInfo {
     pub created_at: u64,
     pub is_paused: bool,
     pub clawback_enabled: bool,
+    pub freeze_enabled: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamInfo {
+    pub id: u64,
+    pub creator: Address,
+    pub recipient: Address,
+    pub token_index: u32,
+    pub total_amount: i128,
+    pub claimed_amount: i128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub cliff_time: u64,
+    pub metadata: Option<String>,
+    pub cancelled: bool,
+    pub paused: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamParams {
+    pub recipient: Address,
+    pub token_index: u32,
+    pub total_amount: i128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub cliff_time: u64,
+}
+
+/// Current lifecycle state for a vault allocation.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VaultStatus {
+    Active,
+    Claimed,
+    Cancelled,
+}
+
+/// Time-locked and milestone-gated token allocation vault.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Vault {
+    pub id: u64,
+    pub token: Address,
+    pub owner: Address,
+    pub creator: Address,
+    pub total_amount: i128,
+    pub claimed_amount: i128,
+    pub unlock_time: u64,
+    pub milestone_hash: BytesN<32>,
+    pub status: VaultStatus,
+    pub created_at: u64,
 }
 
 /// Compact read-only snapshot of a token's current state.
@@ -93,24 +147,12 @@ pub struct TokenInfo {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenStats {
-    pub current_supply: i128,
-    pub total_burned: i128,
+    pub current_supply: i128, // live circulating supply
+    pub total_burned: i128,   // cumulative amount burned since creation
     pub burn_count: u32,
     pub is_paused: bool,
-    pub has_clawback: bool,
     pub clawback_enabled: bool,
     pub freeze_enabled: bool,
-}
-
-/// Parameters for token creation in single/batch flows.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenCreationParams {
-    pub name: String,
-    pub symbol: String,
-    pub decimals: u32,
-    pub initial_supply: i128,
-    pub metadata_uri: Option<String>,
 }
 
 /// Batch fee update structure for Phase 2 optimization
@@ -158,8 +200,6 @@ pub struct FeeUpdate {
 /// * `NextChangeId` - Next available change ID
 /// * `CreatorTokens(Address)` - Vector of token indices for a creator
 /// * `CreatorTokenCount(Address)` - Number of tokens created by address
-/// * `TokenStreams(u32)` - Vector of stream IDs for a token
-/// * `TokenStreamCount(u32)` - Number of streams for a token
 /// * `TreasuryPolicy` - Treasury withdrawal policy
 /// * `WithdrawalPeriod` - Current withdrawal period tracking
 /// * `AllowedRecipient(Address)` - Whether address is allowed recipient
@@ -183,116 +223,80 @@ pub enum DataKey {
     NextChangeId,
     CreatorTokens(Address),
     CreatorTokenCount(Address),
-    TokenStreams(u32),
-    TokenStreamCount(u32),
     TreasuryPolicy,
     WithdrawalPeriod,
     AllowedRecipient(Address),
+    Proposal(u64),
+    ProposalCount,
+    NextProposalId,
+    ProposalVote(u64, Address),
     // Stream management keys
-    StreamCount,                    // Total number of streams created
-    Stream(u64),                    // Stream info by ID (using u64 for consistency)
-    NextStreamId,                   // Next available stream ID
-    // Governance proposal keys
-    ProposalCount,                  // Total number of proposals created
-    Proposal(u64),                  // Proposal by ID
-    NextProposalId,                 // Next available proposal ID
-    ProposalVote(u64, Address),     // Vote by proposal ID and voter address
+    StreamCount,
+    Stream(u32),
+    StreamByCreator(Address, u32),
+    TokenStreams(u32),
+    TokenStreamCount(u32),
+    NextStreamId,
+    GovernanceConfig,
+    // Vault management keys
+    Vault(u64),
+    VaultCount,
+    VaultByOwner(Address, u32),
+    OwnerVaultCount(Address),
+    VaultByCreator(Address, u32),
+    CreatorVaultCount(Address),
 }
 
 /// Contract error codes
 ///
-/// Defines all possible error conditions that can occur during
-/// contract execution. Each error has a unique numeric code.
-///
-/// # Variants
-/// * `InsufficientFee` - Provided fee is less than required
-/// * `Unauthorized` - Caller lacks required permissions
-/// * `InvalidParameters` - Function arguments are invalid
-/// * `TokenNotFound` - Requested token does not exist
-/// * `MetadataAlreadySet` - Token metadata cannot be changed
-/// * `AlreadyInitialized` - Contract has already been initialized
-/// * `InsufficientBalance` - Account balance too low for operation
-/// * `ArithmeticError` - Numeric overflow or underflow occurred
-/// * `BatchTooLarge` - Batch operation exceeds maximum size
-/// * `InvalidAmount` - Amount is zero or negative
-/// * `ClawbackDisabled` - Clawback not enabled for this token
-/// * `InvalidBurnAmount` - Burn amount is invalid
-/// * `BurnAmountExceedsBalance` - Burn amount exceeds available balance
-/// * `ContractPaused` - Operation not allowed while paused
-/// * `TimelockNotExpired` - Timelock period has not elapsed
-/// * `ChangeAlreadyExecuted` - Change has already been executed
-/// * `MaxSupplyExceeded` - Minting would exceed max supply cap
-/// * `InvalidMaxSupply` - Max supply is less than initial supply
-/// * `WithdrawalCapExceeded` - Withdrawal would exceed daily cap
-/// * `RecipientNotAllowed` - Recipient not in allowlist
-///
-/// # Examples
-/// ```
-/// if amount <= 0 {
-///     return Err(Error::InvalidAmount);
-/// }
-/// ```
+/// Every variant maps to a stable numeric code consumed by downstream clients.
+/// Vault lifecycle failures use codes 60-65 (`VaultNotFound`, `VaultLocked`,
+/// `VaultAlreadyClaimed`, `VaultCancelled`, `InvalidVaultConfig`, `NothingToClaim`).
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    InsufficientFee     = 1,
-    Unauthorized        = 2,
-    InvalidParameters   = 3,
-    TokenNotFound       = 4,
-    MetadataAlreadySet  = 5,
-    AlreadyInitialized  = 6,
+    InsufficientFee = 1,
+    Unauthorized = 2,
+    InvalidParameters = 3,
+    TokenNotFound = 4,
+    MetadataAlreadySet = 5,
+    AlreadyInitialized = 6,
     InsufficientBalance = 7,
-    ArithmeticError     = 8,
-    BatchTooLarge       = 9,
-    TokenPaused         = 10,
-    InvalidAmount = 11,
-    ClawbackDisabled = 12,
-    InvalidBurnAmount = 13,
-    BurnAmountExceedsBalance = 14,
-    ContractPaused = 15,
-    InvalidTokenParams = 16,
-    BatchCreationFailed = 17,
-    TimelockNotExpired = 18,
-    ChangeAlreadyExecuted = 19,
-    MaxSupplyExceeded = 20,
-    InvalidMaxSupply = 21,
-    WithdrawalCapExceeded = 22,
-    RecipientNotAllowed = 23,
-    MissingAdmin = 24,
-    MissingTreasury = 25,
-    InvalidBaseFee = 26,
-    InvalidMetadataFee = 27,
-    InconsistentTokenCount = 28,
-    StreamNotFound = 29,
-    StreamCancelled = 30,
-    NothingToClaim = 31,
-    CliffNotReached = 32,
-    InvalidSchedule = 33,  // Invalid time schedule (cliff outside valid bounds)
-    StreamPaused = 34,
-    InvalidTimeWindow = 35,
-    PayloadTooLarge = 36,
-    ProposalNotFound = 37,
-    VotingNotStarted = 38,
-    VotingEnded = 39,
-    AlreadyVoted = 40,
+    ArithmeticError = 8,
+    BatchTooLarge = 9,
+    InvalidAmount = 10,
+    ClawbackDisabled = 11,
+    InvalidBurnAmount = 12,
+    BurnAmountExceedsBalance = 13,
+    ContractPaused = 14,
+    InvalidTokenParams = 15,
+    BatchCreationFailed = 16,
+    StreamNotFound = 17,
+    InvalidSchedule = 18,
+    StreamCancelled = 19,
+    CliffNotReached = 20,
+    NothingToClaim = 21,
+    MissingAdmin = 22,
+    MissingTreasury = 23,
+    InvalidBaseFee = 24,
+    InvalidMetadataFee = 25,
+    InconsistentTokenCount = 26,
+    WithdrawalCapExceeded = 27,
+    RecipientNotAllowed = 28,
+    TimelockNotExpired = 29,
+    ChangeAlreadyExecuted = 30,
+    ChangeNotFound = 31,
+    MaxSupplyExceeded = 32,
+    InvalidMaxSupply = 33,
+    MintingDisabled = 34,
+    TokenPaused = 35,
 }
 
 /// Type of pending change
 ///
 /// Identifies which operation is being timelocked.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ChangeType {
-    FeeUpdate,
-    PauseUpdate,
-    TreasuryUpdate,
-}
-
-/// Type of governance action
-///
-/// Identifies the type of action proposed in a governance proposal.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionType {
     FeeChange,
     TreasuryChange,
@@ -301,47 +305,34 @@ pub enum ActionType {
     PolicyUpdate,
 }
 
-/// Vote choice for a proposal
-///
-/// Represents the voter's position on a proposal.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VoteChoice {
     For,
     Against,
     Abstain,
 }
 
-/// Governance proposal
-///
-/// Represents a proposal for a governance action with voting period.
-///
-/// # Fields
-/// * `id` - Unique proposal identifier
-/// * `proposer` - Address that created the proposal
-/// * `action_type` - Type of action being proposed
-/// * `payload` - Encoded action payload (bounded to 1024 bytes)
-/// * `start_time` - Voting start timestamp
-/// * `end_time` - Voting end timestamp
-/// * `eta` - Estimated time of execution after approval
-/// * `created_at` - Timestamp when proposal was created
-/// * `votes_for` - Number of votes in favor
-/// * `votes_against` - Number of votes against
-/// * `votes_abstain` - Number of abstain votes
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProposalState {
+    Created,
+    Active,
+    Succeeded,
+    Defeated,
+    Queued,
+    Executed,
+    Cancelled,
+    Expired,
+    Failed,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Proposal {
-    pub id: u64,
-    pub proposer: Address,
-    pub action_type: ActionType,
-    pub payload: Bytes,
-    pub start_time: u64,
-    pub end_time: u64,
-    pub eta: u64,
-    pub created_at: u64,
-    pub votes_for: u32,
-    pub votes_against: u32,
-    pub votes_abstain: u32,
+pub enum ChangeType {
+    FeeUpdate,
+    PauseUpdate,
+    TreasuryUpdate,
 }
 
 /// Pending change awaiting timelock expiry
@@ -375,6 +366,27 @@ pub struct PendingChange {
     pub treasury: Option<Address>,
 }
 
+/// Governance proposal
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub action_type: ActionType,
+    pub payload: Bytes,
+    pub description: String,
+    pub created_at: u64,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub eta: u64,
+    pub votes_for: i128,
+    pub votes_against: i128,
+    pub votes_abstain: i128,
+    pub state: ProposalState,
+    pub executed_at: Option<u64>,
+    pub cancelled_at: Option<u64>,
+}
+
 /// Pagination cursor for token queries
 ///
 /// Represents the position in a paginated result set.
@@ -397,9 +409,17 @@ pub struct PaginationCursor {
 /// * `cursor` - Cursor for next page (None = no more results)
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamPage {
+    pub token_indices: Vec<u32>,
+    pub next_cursor: Option<u32>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaginatedTokens {
     pub tokens: soroban_sdk::Vec<TokenInfo>,
-    pub cursor: Option<u32>,
+    pub has_more: bool,
+    pub cursor: PaginationCursor,
 }
 
 /// Treasury withdrawal policy
@@ -432,69 +452,86 @@ pub struct WithdrawalPeriod {
     pub amount_withdrawn: i128,
 }
 
-/// Stream information
-///
-/// Contains all data for a payment stream including vesting schedule.
-///
-/// # Fields
-/// * `id` - Unique stream identifier
-/// * `creator` - Address that created the stream
-/// * `recipient` - Address that receives vested tokens
-/// * `token_index` - Index of the token being streamed
-/// * `total_amount` - Total amount to be vested
-/// * `claimed_amount` - Amount already claimed by recipient
-/// * `start_time` - Stream start timestamp
-/// * `end_time` - Stream end timestamp (full vesting)
-/// * `cliff_time` - Cliff timestamp (no claims before this)
-/// * `cancelled` - Whether the stream has been cancelled
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StreamInfo {
-    pub id: u64,
-    pub creator: Address,
-    pub recipient: Address,
-    pub token_index: u32,
-    pub total_amount: i128,
-    pub claimed_amount: i128,
-    pub start_time: u64,
-    pub end_time: u64,
-    pub cliff_time: u64,
-    pub cancelled: bool,
-    pub paused: bool,
-}
+#[cfg(test)]
+mod tests {
+    use super::{DataKey, Vault, VaultStatus};
+    use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, BytesN, Env};
 
-/// Stream creation parameters
-///
-/// Parameters for creating a new payment stream.
-///
-/// # Fields
-/// * `recipient` - Address that will receive vested tokens
-/// * `token_index` - Index of the token to stream
-/// * `total_amount` - Total amount to vest
-/// * `start_time` - Stream start timestamp
-/// * `end_time` - Stream end timestamp
-/// * `cliff_time` - Cliff timestamp
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StreamParams {
-    pub recipient: Address,
-    pub token_index: u32,
-    pub total_amount: i128,
-    pub start_time: u64,
-    pub end_time: u64,
-    pub cliff_time: u64,
-}
+    #[contract]
+    struct VaultTypeTestContract;
 
-/// Timelock configuration
-///
-/// Defines the delay period for timelocked operations.
-///
-/// # Fields
-/// * `delay_seconds` - Delay in seconds before changes can be executed
-/// * `enabled` - Whether timelock is enabled
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TimelockConfig {
-    pub delay_seconds: u64,
-    pub enabled: bool,
+    #[contractimpl]
+    impl VaultTypeTestContract {}
+
+    fn setup() -> (Env, Address) {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, VaultTypeTestContract);
+        (env, contract_id)
+    }
+
+    #[test]
+    fn test_vault_status_serialization_round_trip() {
+        let (env, contract_id) = setup();
+        let variants = [
+            VaultStatus::Active,
+            VaultStatus::Claimed,
+            VaultStatus::Cancelled,
+        ];
+
+        env.as_contract(&contract_id, || {
+            for (i, status) in variants.iter().enumerate() {
+                let key = DataKey::Vault(i as u64);
+                env.storage().instance().set(&key, status);
+                let decoded: VaultStatus = env.storage().instance().get(&key).unwrap();
+                assert_eq!(decoded, *status);
+            }
+        });
+    }
+
+    #[test]
+    fn test_vault_serialization_round_trip() {
+        let (env, contract_id) = setup();
+        let vault = Vault {
+            id: 42,
+            token: Address::generate(&env),
+            owner: Address::generate(&env),
+            creator: Address::generate(&env),
+            total_amount: 1_000_000,
+            claimed_amount: 250_000,
+            unlock_time: 1_750_000_000,
+            milestone_hash: BytesN::from_array(&env, &[7u8; 32]),
+            status: VaultStatus::Active,
+            created_at: 1_700_000_000,
+        };
+
+        env.as_contract(&contract_id, || {
+            let key = DataKey::Vault(vault.id);
+            env.storage().instance().set(&key, &vault);
+            let decoded: Vault = env.storage().instance().get(&key).unwrap();
+            assert_eq!(decoded, vault);
+        });
+    }
+
+    #[test]
+    fn test_vault_datakey_serialization_round_trip() {
+        let (env, contract_id) = setup();
+        let owner = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let keys = [
+            DataKey::Vault(99),
+            DataKey::VaultCount,
+            DataKey::VaultByOwner(owner, 1),
+            DataKey::OwnerVaultCount(Address::generate(&env)),
+            DataKey::VaultByCreator(creator, 2),
+            DataKey::CreatorVaultCount(Address::generate(&env)),
+        ];
+
+        env.as_contract(&contract_id, || {
+            for (i, key) in keys.iter().enumerate() {
+                env.storage().instance().set(key, &(i as u32));
+                let value: u32 = env.storage().instance().get(key).unwrap();
+                assert_eq!(value, i as u32);
+            }
+        });
+    }
 }

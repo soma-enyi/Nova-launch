@@ -29,12 +29,17 @@ impl TestEnv {
         storage::set_base_fee(&env, 1_000_000);
         storage::set_metadata_fee(&env, 500_000);
 
-        Self { env, admin, treasury }
+        Self {
+            env,
+            admin,
+            treasury,
+        }
     }
 
     pub fn with_timelock(delay_seconds: u64) -> Self {
         let test_env = Self::new();
         timelock::initialize_timelock(&test_env.env, Some(delay_seconds)).unwrap();
+        crate::governance::initialize_governance(&test_env.env, Some(30), Some(51)).unwrap();
         test_env
     }
 }
@@ -170,7 +175,7 @@ impl<'a> VoteHelper<'a> {
         Ok(())
     }
 
-    pub fn counts(&self, proposal_id: u64) -> Option<(u32, u32, u32)> {
+    pub fn counts(&self, proposal_id: u64) -> Option<(i128, i128, i128)> {
         timelock::get_vote_counts(self.env, proposal_id)
     }
 }
@@ -193,7 +198,7 @@ impl<'a> StateAssertions<'a> {
         assert_eq!(storage::get_proposal_count(self.env) as u64, count);
     }
 
-    pub fn assert_vote_counts(&self, proposal_id: u64, yes: u32, no: u32, abstain: u32) {
+    pub fn assert_vote_counts(&self, proposal_id: u64, yes: i128, no: i128, abstain: i128) {
         let counts = timelock::get_vote_counts(self.env, proposal_id).unwrap();
         assert_eq!(counts, (yes, no, abstain));
     }
@@ -229,7 +234,11 @@ impl<'a> EventAssertions<'a> {
     }
 
     pub fn assert_count(&self, name: &str, expected: u32) {
-        assert_eq!(self.count(name), expected as usize, "event count mismatch for {name}");
+        assert_eq!(
+            self.count(name),
+            expected as usize,
+            "event count mismatch for {name}"
+        );
     }
 
     pub fn assert_chronological(&self, _expected: &[&str]) {
